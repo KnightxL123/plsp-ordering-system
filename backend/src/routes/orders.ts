@@ -1,5 +1,6 @@
 import { Router } from "express";
 import prisma from "../lib/prisma";
+import { PaymentMethod } from "@prisma/client";
 import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 
 const router = Router();
@@ -70,7 +71,7 @@ router.post("/", async (req: AuthenticatedRequest, res) => {
       data: {
         userId: req.user.userId,
         status: "PENDING_PAYMENT",
-        paymentMethod,
+        paymentMethod: paymentMethod as PaymentMethod,
         paymentStatus: paymentMethod === "ONLINE" ? "PENDING" : "UNPAID",
         totalAmount,
         pickupLocation: pickupLocation || null,
