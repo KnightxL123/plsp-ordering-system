@@ -42,6 +42,13 @@ interface Order {
   payment: PaymentInfo | null;
 }
 
+interface OrdersApiResponse {
+  data: Order[];
+  total: number;
+  page: number;
+  perPage: number;
+}
+
 const statusLabels: Record<string, string> = {
   PENDING_PAYMENT: "Pending Payment",
   PAID: "Paid",
@@ -51,19 +58,72 @@ const statusLabels: Record<string, string> = {
   CANCELLED: "Cancelled",
 };
 
+function formatDateInput(date: Date) {
+  const offset = date.getTimezoneOffset();
+  const adjusted = new Date(date.getTime() - offset * 60 * 1000);
+  return adjusted.toISOString().slice(0, 16);
+}
+
 const OrdersPage: React.FC = () => {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [selectedStatus, setSelectedStatus] = useState<string>("ALL");
+  const [searchInput, setSearchInput] = useState("");
+  const [activeSearch, setActiveSearch] = useState("");
+  const [selectedPayment, setSelectedPayment] = useState<string>("ALL");
+  const [startDateTime, setStartDateTime] = useState("");
+  const [endDateTime, setEndDateTime] = useState("");
+  const [page, setPage] = useState(1);
+  const [perPage, setPerPage] = useState(20);
+  const [total, setTotal] = useState(0);
+  const [detailOrder, setDetailOrder] = useState<Order | null>(null);
+
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+
+  const buildParams = (includePagination = true) => {
+    const params: Record<string, string> = {};
+    if (selectedStatus !== "ALL") {
+      params.status = selectedStatus;
+    }
+    if (activeSearch.trim()) {
+      params.search = activeSearch.trim();
+    }
+    if (selectedPayment !== "ALL") {
+      params.paymentMethod = selectedPayment;
+    }
+    if (startDateTime) {
+      params.startDate = startDateTime;
+    }
+    if (endDateTime) {
+      params.endDate = endDateTime;
+    }
+    if (includePagination) {
+      params.page = String(page);
+      params.perPage = String(perPage);
+    }
+    return params;
+  };
 
   useEffect(() => {
     async function fetchOrders() {
       try {
         setLoading(true);
-        const res = await api.get<Order[]>("/admin/orders");
-        setOrders(res.data);
+        const res = await api.get<OrdersApiResponse | Order[]>("/admin/orders", {
+          params: buildParams(true),
+        });
+        if (Array.isArray(res.data)) {
+          setOrders(res.data);
+          setTotal(res.data.length);
+          setPage(1);
+          setPerPage(Math.min(perPage, Math.max(1, res.data.length)) || 20);
+        } else {
+          setOrders(res.data.data);
+          setTotal(res.data.total);
+          setPage(res.data.page);
+          setPerPage(res.data.perPage);
+        }
       } catch (err) {
         console.error(err);
         setError("Failed to load orders");
@@ -73,7 +133,11 @@ const OrdersPage: React.FC = () => {
     }
 
     fetchOrders();
-  }, []);
+  }, [selectedStatus, activeSearch, selectedPayment, startDateTime, endDateTime, page, perPage]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [selectedStatus, activeSearch, selectedPayment, startDateTime, endDateTime]);
 
   async function updateStatus(orderId: string, newStatus: string) {
     try {
@@ -91,10 +155,28 @@ const OrdersPage: React.FC = () => {
     }
   }
 
-  const filteredOrders =
-    selectedStatus === "ALL"
-      ? orders
-      : orders.filter((o) => o.status === selectedStatus);
+  const filteredOrders = orders;
+
+  async function handleExport() {
+    try {
+      const res = await api.get<ArrayBuffer>("/admin/orders", {
+        params: { ...buildParams(false), export: "csv" },
+        responseType: "blob",
+      });
+      const blob = new Blob([res.data], { type: "text/csv" });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `orders-${new Date().toISOString()}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error(err);
+      alert("Failed to export CSV");
+    }
+  }
 
   if (loading) {
     return <div>Loading orders...</div>;
@@ -107,21 +189,207 @@ const OrdersPage: React.FC = () => {
   return (
     <div>
       <h1 className="mb-4 text-2xl font-bold">Orders</h1>
-      <div className="mb-4 flex items-center gap-2 text-sm">
-        <span className="text-slate-700">Filter by status:</span>
-        <select
-          className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 shadow-sm focus:border-slate-500 focus:outline-none"
-          value={selectedStatus}
-          onChange={(e) => setSelectedStatus(e.target.value)}
+      <div className="mb-4 flex flex-wrap items-center gap-3 text-sm">
+        <label className="flex items-center gap-2 text-slate-700">
+          <span>Filter by status:</span>
+          <select
+            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 shadow-sm focus:border-slate-500 focus:outline-none"
+            value={selectedStatus}
+            onChange={(e) => setSelectedStatus(e.target.value)}
+          >
+            <option value="ALL">All</option>
+            {Object.entries(statusLabels).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-2 text-slate-700">
+          <span>Payment:</span>
+          <select
+            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 shadow-sm focus:border-slate-500 focus:outline-none"
+            value={selectedPayment}
+            onChange={(e) => setSelectedPayment(e.target.value)}
+          >
+            <option value="ALL">All</option>
+            <option value="CASH_ON_PICKUP">Cash on Pickup</option>
+            <option value="ONLINE">Online</option>
+          </select>
+        </label>
+        <form
+          className="flex items-center gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setActiveSearch(searchInput);
+          }}
         >
-          <option value="ALL">All</option>
-          {Object.entries(statusLabels).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
+          <input
+            type="text"
+            placeholder="Search ID, email, name..."
+            className="min-w-[220px] rounded border border-slate-300 px-2 py-1 text-xs focus:border-slate-500 focus:outline-none"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+          />
+          <button
+            type="submit"
+            className="rounded bg-slate-800 px-3 py-1 text-xs font-semibold text-white hover:bg-slate-700"
+          >
+            Search
+          </button>
+          {(activeSearch || searchInput) && (
+            <button
+              type="button"
+              className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+              onClick={() => {
+                setSearchInput("");
+                setActiveSearch("");
+              }}
+            >
+              Clear
+            </button>
+          )}
+        </form>
+        <div className="flex flex-wrap items-end gap-2 text-xs text-slate-700">
+          <label className="flex flex-col">
+            <span className="mb-1">Start</span>
+            <input
+              type="datetime-local"
+              className="rounded border border-slate-300 px-2 py-1 focus:border-slate-500 focus:outline-none"
+              value={startDateTime}
+              onChange={(e) => setStartDateTime(e.target.value)}
+            />
+          </label>
+          <label className="flex flex-col">
+            <span className="mb-1">End</span>
+            <input
+              type="datetime-local"
+              className="rounded border border-slate-300 px-2 py-1 focus:border-slate-500 focus:outline-none"
+              value={endDateTime}
+              onChange={(e) => setEndDateTime(e.target.value)}
+            />
+          </label>
+          {(startDateTime || endDateTime) && (
+            <button
+              type="button"
+              className="self-end rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+              onClick={() => {
+                setStartDateTime("");
+                setEndDateTime("");
+              }}
+            >
+              Clear Dates
+            </button>
+          )}
+          <div className="flex items-center gap-1">
+            <span className="text-slate-600">Preset:</span>
+            <button
+              type="button"
+              className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+              onClick={() => {
+                const start = new Date();
+                start.setHours(0, 0, 0, 0);
+                const end = new Date();
+                end.setHours(23, 59, 59, 999);
+                setStartDateTime(formatDateInput(start));
+                setEndDateTime(formatDateInput(end));
+              }}
+            >
+              Today
+            </button>
+            <button
+              type="button"
+              className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+              onClick={() => {
+                const now = new Date();
+                const start = new Date(now);
+                const day = now.getDay(); // Sunday=0
+                start.setDate(now.getDate() - day);
+                start.setHours(0, 0, 0, 0);
+                const end = new Date(start);
+                end.setDate(start.getDate() + 6);
+                end.setHours(23, 59, 59, 999);
+                setStartDateTime(formatDateInput(start));
+                setEndDateTime(formatDateInput(end));
+              }}
+            >
+              This week
+            </button>
+            <button
+              type="button"
+              className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+              onClick={() => {
+                const end = new Date();
+                end.setHours(23, 59, 59, 999);
+                const start = new Date(end);
+                start.setDate(end.getDate() - 6);
+                start.setHours(0, 0, 0, 0);
+                setStartDateTime(formatDateInput(start));
+                setEndDateTime(formatDateInput(end));
+              }}
+            >
+              Last 7 days
+            </button>
+            <button
+              type="button"
+              className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+              onClick={() => {
+                const now = new Date();
+                const start = new Date(now.getFullYear(), now.getMonth(), 1);
+                start.setHours(0, 0, 0, 0);
+                const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+                end.setHours(23, 59, 59, 999);
+                setStartDateTime(formatDateInput(start));
+                setEndDateTime(formatDateInput(end));
+              }}
+            >
+              This month
+            </button>
+          </div>
+          <button
+            type="button"
+            className="self-end rounded border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+            onClick={handleExport}
+          >
+            Export CSV
+          </button>
+        </div>
       </div>
+      {(selectedStatus !== "ALL" ||
+        selectedPayment !== "ALL" ||
+        activeSearch ||
+        startDateTime ||
+        endDateTime) && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
+          {selectedStatus !== "ALL" && (
+            <FilterChip label={`Status: ${statusLabels[selectedStatus] ?? selectedStatus}`} onClear={() => setSelectedStatus("ALL")} />
+          )}
+          {selectedPayment !== "ALL" && (
+            <FilterChip
+              label={`Payment: ${selectedPayment === "CASH_ON_PICKUP" ? "Cash on Pickup" : "Online"}`}
+              onClear={() => setSelectedPayment("ALL")}
+            />
+          )}
+          {activeSearch && (
+            <FilterChip label={`Search: ${activeSearch}`} onClear={() => {
+              setActiveSearch("");
+              setSearchInput("");
+            }} />
+          )}
+          {startDateTime && (
+            <FilterChip
+              label={`Start: ${new Date(startDateTime).toLocaleString("en-PH")}`}
+              onClear={() => setStartDateTime("")}
+            />
+          )}
+          {endDateTime && (
+            <FilterChip
+              label={`End: ${new Date(endDateTime).toLocaleString("en-PH")}`}
+              onClear={() => setEndDateTime("")}
+            />
+          )}
+        </div>
+      )}
       {filteredOrders.length === 0 ? (
         <div className="text-sm text-slate-600">No orders yet.</div>
       ) : (
@@ -186,7 +454,13 @@ const OrdersPage: React.FC = () => {
                     </div>
                   </td>
                   <td className="px-4 py-2 text-xs text-slate-500">
-                    {new Date(order.createdAt).toLocaleString("en-PH")}
+                    <div>{new Date(order.createdAt).toLocaleString("en-PH")}</div>
+                    <button
+                      className="mt-2 rounded border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                      onClick={() => setDetailOrder(order)}
+                    >
+                      View
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -194,8 +468,169 @@ const OrdersPage: React.FC = () => {
           </table>
         </div>
       )}
+      {filteredOrders.length > 0 && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-slate-700">
+          <div>
+            Showing {(page - 1) * perPage + 1}-
+            {Math.min(page * perPage, total)} of {total} orders
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              className="rounded border border-slate-300 px-3 py-1 text-xs disabled:opacity-40"
+              onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+              disabled={page <= 1}
+            >
+              Previous
+            </button>
+            <span>
+              Page {page} of {totalPages}
+            </span>
+            <button
+              className="rounded border border-slate-300 px-3 py-1 text-xs disabled:opacity-40"
+              onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
+              disabled={page >= totalPages}
+            >
+              Next
+            </button>
+            <label className="flex items-center gap-1 text-xs">
+              <span>Per page:</span>
+              <select
+                className="rounded border border-slate-300 px-2 py-1"
+                value={perPage}
+                onChange={(e) => {
+                  setPerPage(Number(e.target.value));
+                  setPage(1);
+                }}
+              >
+                {[10, 20, 50, 100].map((size) => (
+                  <option key={size} value={size}>
+                    {size}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
+      )}
+      {detailOrder && (
+        <OrderDetailModal
+          order={detailOrder}
+          onClose={() => setDetailOrder(null)}
+        />
+      )}
     </div>
   );
 };
 
 export default OrdersPage;
+
+interface FilterChipProps {
+  label: string;
+  onClear: () => void;
+}
+
+const FilterChip: React.FC<FilterChipProps> = ({ label, onClear }) => (
+  <span className="inline-flex items-center gap-1 rounded-full border border-slate-300 bg-white px-3 py-1 text-slate-700 shadow-sm">
+    {label}
+    <button
+      type="button"
+      className="text-slate-500 hover:text-slate-800"
+      onClick={onClear}
+      aria-label={`Remove ${label}`}
+    >
+      ×
+    </button>
+  </span>
+);
+
+interface OrderDetailModalProps {
+  order: Order;
+  onClose: () => void;
+}
+
+const OrderDetailModal: React.FC<OrderDetailModalProps> = ({ order, onClose }) => {
+  const total = Number(order.totalAmount) || 0;
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 px-4 py-6">
+      <div className="w-full max-w-2xl rounded-lg bg-white shadow-xl">
+        <div className="flex items-start justify-between border-b border-slate-200 px-6 py-4">
+          <div>
+            <p className="text-xs uppercase tracking-wide text-slate-500">Order ID</p>
+            <p className="font-mono text-sm text-slate-800">{order.id}</p>
+          </div>
+          <button
+            className="rounded border border-slate-300 px-3 py-1 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            onClick={onClose}
+          >
+            Close
+          </button>
+        </div>
+        <div className="grid gap-6 px-6 py-4 md:grid-cols-2">
+          <section className="space-y-2">
+            <h2 className="text-sm font-semibold text-slate-700">Status & Payment</h2>
+            <div className="text-sm text-slate-700">
+              <div>
+                <span className="font-medium">Status:</span> {statusLabels[order.status] ?? order.status}
+              </div>
+              <div>
+                <span className="font-medium">Payment Method:</span>{" "}
+                {order.paymentMethod === "CASH_ON_PICKUP" ? "Cash on Pickup" : order.paymentMethod}
+              </div>
+              <div>
+                <span className="font-medium">Payment Status:</span> {order.paymentStatus}
+              </div>
+              {order.payment?.provider && (
+                <div>
+                  <span className="font-medium">Provider:</span> {order.payment.provider}
+                </div>
+              )}
+            </div>
+          </section>
+          <section className="space-y-2">
+            <h2 className="text-sm font-semibold text-slate-700">Pickup Details</h2>
+            <div className="text-sm text-slate-700">
+              <div>
+                <span className="font-medium">Location:</span>{" "}
+                {order.pickupLocation ? order.pickupLocation : "No location provided"}
+              </div>
+              <div>
+                <span className="font-medium">Schedule:</span>{" "}
+                {order.pickupSchedule ? new Date(order.pickupSchedule).toLocaleString("en-PH") : "No schedule provided"}
+              </div>
+            </div>
+          </section>
+        </div>
+        <section className="px-6 pb-4">
+          <h2 className="text-sm font-semibold text-slate-700">Items</h2>
+          <div className="mt-2 overflow-hidden rounded border border-slate-200">
+            <table className="min-w-full text-sm">
+              <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-3 py-2">Product</th>
+                  <th className="px-3 py-2">Variant</th>
+                  <th className="px-3 py-2">Qty</th>
+                  <th className="px-3 py-2">Line Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {order.items.map((item) => (
+                  <tr key={item.id} className="border-t border-slate-100">
+                    <td className="px-3 py-2 text-slate-800">{item.product.name}</td>
+                    <td className="px-3 py-2 text-slate-600">{item.variant?.name ?? "—"}</td>
+                    <td className="px-3 py-2">{item.quantity}</td>
+                    <td className="px-3 py-2">
+                      ₱{Number(item.lineTotal).toLocaleString("en-PH", { minimumFractionDigits: 2 })}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="mt-4 flex items-center justify-end text-base font-semibold text-slate-800">
+            Total: ₱{total.toLocaleString("en-PH", { minimumFractionDigits: 2 })}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+};
